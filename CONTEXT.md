@@ -47,6 +47,8 @@ Nearly every commit is an automated publish named `v1.1: LeafLink API refresh <d
 
 ### Source that builds it (on the build machine, `/workspace`; NOT in this repo)
 
+> **Source of truth (Oct 8, 2026):** the editable code is now in the **private** repo `ethangilman-hash/indulge-crm-source`. It holds `yoy_dashboard/` code, `leaflink/`, `qa/`, `tools/box_sync.py`, `HANDOFF.md` and `AGENTS.md`. The Worker is in the private `ethangilman-hash/crm-sync` repo. Work on branches with PRs; a box agent deploys code to the paths below with `tools/box_sync.py` and publishes through `pull.py`. This public repo stays the encrypted deploy artifact only.
+
 ```
 /workspace/yoy_dashboard/          # page source + build (not under git; dated copies in backups/)
 ├── build.py                       # assembles template + data payload → index.html (plaintext, never published)
@@ -182,7 +184,7 @@ Filters are kept in the URL hash, e.g. `#sales/trends?dr=l60&years=2024,2025`.
   - A date window that crosses New Year, or a Custom range spanning two years, can't be repeated in each year. It falls back to the overlap between the selected years and the range (labelled in the UI).
   - The Leaderboard period label for non-contiguous years-only selections shows the first-to-last span.
   - YoY chart "new line" markers can appear outside the window months.
-  - The build source (`yoy_dashboard`) is not under version control; only dated backups exist.
+  - The build runs from box paths (`/workspace/yoy_dashboard`, `/workspace/leaflink`). Code is versioned in `indulge-crm-source`; data and secrets stay on the box.
 
 ## 6. Immediate next development tasks
 
