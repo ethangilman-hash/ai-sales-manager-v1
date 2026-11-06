@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CRM menu ingest</title>
+<style>
+  body { font-family: sans-serif; max-width: 880px; margin: 24px auto; padding: 0 16px; }
+  label { display: block; margin: 12px 0 4px; }
+  input[type=text], input[type=password], input[type=email] { width: 100%; max-width: 420px; padding: 8px; }
+  button { margin-top: 16px; padding: 10px 16px; font-size: 16px; }
+  #log, #summary, #batches, #verify { white-space: pre-wrap; background: #f6f6f6; padding: 12px; margin-top: 16px; }
+  #status { font-weight: 700; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>Write queued store menus</h1>
+<p>Uses the official CRM sign-in, then writes the queued menu files. The session stays on this helper and is not shown.</p>
+<form id="f" autocomplete="on">
+  <label for="username">Email or username</label>
+  <input id="username" name="username" type="email" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button id="go" type="submit">Sign in and write queued menus</button>
+</form>
+<div id="status">STATUS: WAITING</div>
+<div id="summary"></div>
+<div id="batches"></div>
+<div id="verify"></div>
+<div id="log"></div>
+<script>
+(function () {
+  var statusEl = document.getElementById('status');
+  var summaryEl = document.getElementById('summary');
+  var batchesEl = document.getElementById('batches');
+  var verifyEl = document.getElementById('verify');
+  var logEl = document.getElementById('log');
+  function setStatus(s) { statusEl.textContent = 'STATUS: ' + s; }
+  function log(s) { logEl.textContent += s + '\n'; }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function skuCount(item) {
+    if (!item) return 0;
+    if (Array.isArray(item.products)) return item.products.length;
+    var brands = item.brands || {};
+    var n = 0;
+    Object.keys(brands).forEach(function (k) { if (Array.isArray(brands[k])) n += brands[k].length; });
+    return n;
+  }
+  function promoKey(p) { return String((p && p.date) || '') + '\n' + String((p && p.text) || ''); }
+  function noteOf(item) {
+    var w = item && item.what_changed;
+    if (w && typeof w === 'object' && !Array.isArray(w)) {
+      return Object.keys(w).map(function (k) { return k + ': ' + w[k]; }).join('; ');
+    }
+    return String((item && (item.changed || item.what_changed)) || '');
+  }
+  function isTimeout(err) {
+    var s = String(err || '').toLowerCase();
+    return ['timeout', '524', '503', '502', '500', 'abort', 'timed out'].some(function (x) { return s.indexOf(x) !== -1; });
+  }
+  var API = "https://crm-sync.ethangilman.workers.dev";
+  async function api(path, opt) {
+    var r = await fetch(API + path, opt);
+    var j = {};
+    try { j = await r.json(); } catch (e) { j = {}; }
+    if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    return j;
+  }
+  async function postFile(name, items, headers) {
+    var res = await api('/menu-promos', { method: 'POST', headers: headers, body: JSON.stringify(items) });
+    var saved = (res.items && res.items.length) || (res.item ? 1 : 0);
+    return { file: name, ok: saved === items.length && items.length > 0, expected: items.length, saved: saved, error: null };
+  }
+  document.getElementById('f').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var user = document.getElementById('username').value.trim();
+    var pass = document.getElementById('password').value;
+    document.getElementById('password').value = '';
+    document.getElementById('go').disabled = true;
+    setStatus('WRITING');
+    summaryEl.textContent = '';
+    batchesEl.textContent = '';
+    verifyEl.textContent = '';
+    logEl.textContent = '';
+    (async function () {
+      var token = null;
+      try {
+        var login = await api('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: user, password: pass, remember: true })
+        });
+        pass = '';
+        user = '';
+        token = login && login.token;
+        if (!token) throw new Error('Sign-in did not return a session');
+        var headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+        var staging = await api('/ingest-staging', { headers: { Authorization: 'Bearer ' + token } });
+        var files = staging.files || [];
+        var posts = [];
+        var postedItems = [];
+        var i, spec, row, c, cr, chunkSaved, chunkErr, chunkItems;
+        for (i = 0; i < files.length; i++) {
+          spec = files[i];
+          setStatus('WRITING ' + spec.file);
+          log('posting ' + spec.file);
+          try {
+            row = await postFile(spec.file, spec.items, headers);
+          } catch (e) {
+            row = { file: spec.file, ok: false, expected: (spec.items || []).length, saved: 0, error: String((e && e.message) || e) };
+          }
+          if (!row.ok && spec.file === 'batch1.json' && isTimeout(row.error) && spec.chunks && spec.chunks.length) {
+            chunkSaved = 0; chunkErr = null; chunkItems = [];
+            for (c = 0; c < spec.chunks.length; c++) {
+              setStatus('WRITING ' + spec.chunks[c].file);
+              try { cr = await postFile(spec.chunks[c].file, spec.chunks[c].items, headers); }
+              catch (e) { cr = { file: spec.chunks[c].file, ok: false, expected: spec.chunks[c].items.length, saved: 0, error: String((e && e.message) || e) }; }
+              posts.push(cr);
+              chunkSaved += cr.saved;
+              if (cr.ok) chunkItems = chunkItems.concat(spec.chunks[c].items);
+              if (!cr.ok && !chunkErr) chunkErr = cr.error;
+              await sleep(600);
+            }
+            postedItems = postedItems.concat(chunkItems);
+            posts.push({ file: spec.file, ok: chunkSaved === row.expected, expected: row.expected, saved: chunkSaved, error: chunkSaved === row.expected ? null : (chunkErr || row.error), split: true });
+          } else {
+            if (row.ok) postedItems = postedItems.concat(spec.items || []);
+            posts.push(row);
+          }
+          await sleep(600);
+        }
+        var checks = [];
+        var mismatches = 0;
+        for (i = 0; i < postedItems.length; i++) {
+          var src = postedItems[i];
+          var aid = String(src.account_id || src.leaflink_customer_id || '');
+          setStatus('VERIFYING ' + (i + 1) + '/' + postedItems.length);
+          try {
+            var got = await api('/menu-promos/' + encodeURIComponent(aid), { headers: { Authorization: 'Bearer ' + token } });
+            var item = got && got.item;
+            if (!item) {
+              checks.push({ account_id: aid, store_name: src.store_name, ok: false, error: 'missing after write' });
+              mismatches += 1;
+            } else {
+              var problems = [];
+              if (src.website && item.website !== src.website) problems.push('website');
+              if (src.menu_url && item.menu_url !== src.menu_url) problems.push('menu_url');
+              var wantPull = src.pull_time || src.pulled_at;
+              if (wantPull && item.pulled_at !== wantPull && item.pull_time !== wantPull) problems.push('pull_time');
+              if (skuCount(item) !== skuCount(src)) problems.push('skus ' + skuCount(item) + '!=' + skuCount(src));
+              var srcNote = noteOf(src);
+              var gotNote = String(item.changed || item.what_changed || '');
+              if (srcNote && srcNote.slice(0, 40) && gotNote.indexOf(srcNote.slice(0, 40)) === -1 && gotNote !== srcNote) {
+                if (src.what_changed && typeof src.what_changed === 'object' && !Array.isArray(src.what_changed)) {
+                  Object.keys(src.what_changed).forEach(function (k) { if (gotNote.indexOf(k) === -1) problems.push('note:' + k); });
+                } else problems.push('changed');
+              }
+              var have = {};
+              (item.promos || []).forEach(function (p) { have[promoKey(p)] = true; });
+              (src.promos || []).forEach(function (p) { if (!have[promoKey(p)]) problems.push('promo missing'); });
+              var pulled = String(item.pulled_at || item.pull_time || '');
+              if ((aid === '992773' || aid === '1295899') && pulled.indexOf('2026-11-06') !== 0) problems.push('leafly-date');
+              if ((aid === '992773' || aid === '1295899') && String(item.menu_url || '').indexOf('leafly.com') === -1) problems.push('leafly-url');
+              var ok = problems.length === 0;
+              if (!ok) mismatches += 1;
+              checks.push({ account_id: aid, store_name: item.store_name || src.store_name, ok: ok, problems: problems, website: item.website, menu_url: item.menu_url, pulled_at: item.pulled_at || item.pull_time, product_sku_count: skuCount(item), promo_count: (item.promos || []).length });
+            }
+          } catch (e) {
+            checks.push({ account_id: aid, store_name: src.store_name, ok: false, error: String((e && e.message) || e) });
+            mismatches += 1;
+          }
+          await sleep(600);
+        }
+        token = null;
+        headers = null;
+        var expectedTotal = staging.expected_accounts || postedItems.length;
+        var savedTotal = posts.reduce(function (n, p) { return n + (p.split ? 0 : (p.saved || 0)); }, 0);
+        // if batch1 was split, the split summary row has the saved count; chunk rows also have saved — don't double-count
+        savedTotal = 0;
+        posts.forEach(function (p) {
+          if (p.split) savedTotal += (p.saved || 0);
+          else if (p.file && String(p.file).indexOf('batch1_p') === 0) return;
+          else savedTotal += (p.saved || 0);
+        });
+        var postFails = posts.filter(function (p) { return !p.ok && !p.split; });
+        // treat split parent as the batch1 result
+        postFails = posts.filter(function (p) { return !p.ok && String(p.file).indexOf('batch1_p') !== 0; });
+        var status = (postFails.length === 0 && mismatches === 0) ? 'ok' : 'partial';
+        var batchesText = posts.map(function (p) {
+          return p.file + ': saved ' + p.saved + '/' + p.expected + (p.ok ? '' : (' ERROR ' + (p.error || '')));
+        }).join('\n');
+        var bad = checks.filter(function (c) { return !c.ok; });
+        var verifyText = bad.length ? bad.map(function (c) {
+          return c.account_id + ' ' + (c.store_name || '') + ' ' + (c.error || (c.problems || []).join(','));
+        }).join('\n') : 'All verified accounts matched website, menu URL, pull time, SKUs, change notes, and posted promos.';
+        var pri = (staging.priority_verify || ['992773', '1295899']).map(function (id) {
+          var c = checks.filter(function (x) { return x.account_id === String(id); })[0];
+          return c ? (id + ' ' + (c.store_name || '') + ' ok=' + c.ok + ' pulled_at=' + (c.pulled_at || '') + ' menu_url=' + (c.menu_url || '') + (c.problems && c.problems.length ? (' problems=' + c.problems.join(',')) : '')) : (id + ' not in verify set');
+        }).join('\n');
+        var summary = 'saved ' + savedTotal + '/' + expectedTotal + ', batch errors ' + postFails.length + ', verified ' + checks.length + ', mismatches ' + mismatches;
+        summaryEl.textContent = summary + '\n' + pri;
+        batchesEl.textContent = batchesText;
+        verifyEl.textContent = verifyText;
+        if (status === 'ok') setStatus('DONE');
+        else setStatus('DONE WITH ISSUES');
+      } catch (e) {
+        token = null;
+        setStatus('FAILED');
+        summaryEl.textContent = String((e && e.message) || e);
+      }
+    })();
+  });
+})();
+</script>
+</body>
+</html>
