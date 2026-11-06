@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CRM promo repair</title>
+<style>
+  body { font-family: sans-serif; max-width: 880px; margin: 24px auto; padding: 0 16px; }
+  label { display: block; margin: 12px 0 4px; }
+  input[type=text], input[type=password], input[type=email] { width: 100%; max-width: 420px; padding: 8px; }
+  button { margin-top: 16px; padding: 10px 16px; font-size: 16px; }
+  #log, #summary, #verify { white-space: pre-wrap; background: #f6f6f6; padding: 12px; margin-top: 16px; }
+  #status { font-weight: 700; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>Repair three promo notes</h1>
+<p>Uses the official CRM sign-in, then re-posts only the promo notes for Rainier, Deanz Foster, and Deanz Sandy. SKU lists, websites, and menus are not sent. The session stays on this helper and is not shown.</p>
+<form id="f" autocomplete="on">
+  <label for="username">Email or username</label>
+  <input id="username" name="username" type="email" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button id="go" type="submit">Sign in and repair promo notes</button>
+</form>
+<div id="status">STATUS: WAITING</div>
+<div id="summary"></div>
+<div id="verify"></div>
+<div id="log"></div>
+<script>
+(function () {
+  var API = "https://crm-sync.ethangilman.workers.dev";
+  var ITEMS = [
+  {
+    "account_id": "993096",
+    "store_name": "Today's Herbal Choice - Rainier",
+    "promos": [
+      {
+        "date": "2026-11-06",
+        "text": "THC Friday. Homepage and Dutchie Specials quote: “20% OFF STOREWIDE | 30% OFF ALL FLOWER *Excludes Green Leaf Specials.” Homepage adds: ALL DAY-NO MINIMUM PURCHASE. Restrictions apply. Iconic blunts and cartridges showed 20% off on their cards ($12.00 to $9.60 for 1.75g glass-tip blunts; $25.00 to $20.00 for 1g carts). Those Iconic items were not seen in the paginated THC Friday Specials list (11 pages). The 30% flower portion does not apply here (no tracked flower). Buzz Bites are flagged GREEN LEAF SPECIAL at $5.00 with no was-price and are excluded from this deal."
+      }
+    ],
+    "leaflink_customer_id": "993096"
+  },
+  {
+    "account_id": "992578",
+    "store_name": "Deanz Greenz - Foster",
+    "promos": [
+      {
+        "date": "2026-11-06",
+        "text": "Daily Happy Hour, homepage The Daily Grind: Early Bird 25% OFF Storewide* (Open–11am) and Night Owl 25% OFF Storewide* (7pm–Close). Footnote: “*Happy Hour Specials excludes Prepacks, PuffCo, and Prerolls under $3.” Applies to the 9 Iconic blunts and prerolls (priced $9–$24) and the 7 Legends 8pk preroll packs at $16.00 (prerolls over $3, not flower prepacks / PuffCo). Cards showed regular prices outside the window. Homepage also says “Must be a DG Rewards Member (its free!)” near the Daily Grind list (placement is after Senior/Vet Sundays; not clearly attached only to Happy Hour)."
+      },
+      {
+        "date": "2026-11-11",
+        "text": "Veterans Day — 25% OFF for Seniors & Veterans, Wednesday, November 11, 2026. Homepage post “Veterans Day Savings for Seniors & Vets + Fresh November Drops” (posted November 5, 2026): “25% OFF storewide on Wednesday, November 11” / “25% OFF storewide for all seniors and veterans.” Requires a DG Rewards account (membership is free). Some restrictions may apply. Dated storewide event (includes the tracked Iconic and Legends items). Distinct from the standing Senior/Vet Sunday 30% OFF Storewide*, which was not logged."
+      }
+    ],
+    "leaflink_customer_id": "992578"
+  },
+  {
+    "account_id": "992579",
+    "store_name": "Deanz Greenz Sandy",
+    "promos": [
+      {
+        "date": "2026-11-06",
+        "text": "Daily Happy Hour, homepage The Daily Grind: Early Bird 25% OFF Storewide* (Open–11am) and Night Owl 25% OFF Storewide* (7pm–Close). Footnote: “*Happy Hour Specials excludes Prepacks, PuffCo, and Prerolls under $3.” Applies to the 3 Iconic flavored infused blunts at $24.00 and the 4 Legends 8pk preroll packs at $16.00 (prerolls over $3, not flower prepacks / PuffCo). Cards showed regular prices outside the window. Homepage also says “Must be a DG Rewards Member (its free!)” near the Daily Grind list (placement is after Senior/Vet Sundays; not clearly attached only to Happy Hour)."
+      },
+      {
+        "date": "2026-11-11",
+        "text": "Veterans Day — 25% OFF for Seniors & Veterans, Wednesday, November 11, 2026. Homepage post “Veterans Day Savings for Seniors & Vets + Fresh November Drops”: “25% OFF storewide on Wednesday, November 11!” / “25% OFF storewide for all seniors and veterans.” Requires a DG Rewards account (membership is free). Some restrictions may apply. Dated storewide event (includes the tracked Iconic and Legends items). Distinct from the standing Senior/Vet Sunday 30% OFF Storewide*, which was not logged."
+      }
+    ],
+    "leaflink_customer_id": "992579"
+  }
+];
+  var statusEl = document.getElementById('status');
+  var summaryEl = document.getElementById('summary');
+  var verifyEl = document.getElementById('verify');
+  var logEl = document.getElementById('log');
+  function setStatus(s) { statusEl.textContent = 'STATUS: ' + s; }
+  function log(s) { logEl.textContent += s + '\n'; }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function promoKey(p) { return String((p && p.date) || '') + '\n' + String((p && p.text) || ''); }
+  async function api(path, opt) {
+    var res = await fetch(API + path, opt);
+    var text = await res.text();
+    var body = null;
+    try { body = JSON.parse(text); } catch (e) { body = { raw: text }; }
+    return { res: res, body: body, text: text };
+  }
+  document.getElementById('f').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var username = document.getElementById('username').value;
+    var password = document.getElementById('password').value;
+    var token = null;
+    (async function () {
+      try {
+        setStatus('SIGNING IN');
+        var login = await api('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username, password: password, remember: true })
+        });
+        if (!login.res.ok || !login.body || !login.body.token) {
+          setStatus('FAILED');
+          summaryEl.textContent = 'Sign-in failed: ' + login.res.status + ' ' + (login.body && (login.body.error || login.body.message) || login.text);
+          return;
+        }
+        token = login.body.token;
+        var headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token };
+        await sleep(600);
+        setStatus('WRITING');
+        var post = await api('/menu-promos', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify({ items: ITEMS })
+        });
+        var saved = (post.body && (post.body.saved != null ? post.body.saved : (post.body.items && post.body.items.length))) || 0;
+        var expected = ITEMS.length;
+        var postOk = post.res.ok;
+        var postErr = post.ok === false ? (post.body && (post.body.error || post.body.message)) : (!postOk ? ((post.body && (post.body.error || post.body.message)) || post.text) : '');
+        log('POST saved ' + saved + '/' + expected + ' status ' + post.res.status + (postErr ? (' ' + postErr) : ''));
+        var checks = [];
+        for (var i = 0; i < ITEMS.length; i++) {
+          await sleep(600);
+          setStatus('VERIFYING ' + (i + 1) + '/' + ITEMS.length);
+          var item = ITEMS[i];
+          var aid = String(item.account_id);
+          var got = await api('/menu-promos/' + encodeURIComponent(aid), { headers: { Authorization: 'Bearer ' + token } });
+          if (!got.res.ok || !got.body || !got.body.item) {
+            checks.push({ account_id: aid, store_name: item.store_name, ok: false, error: 'GET ' + got.res.status, problems: ['GET failed'] });
+            continue;
+          }
+          var have = {};
+          (got.body.item.promos || []).forEach(function (p) { have[promoKey(p)] = true; });
+          var problems = [];
+          (item.promos || []).forEach(function (p) {
+            if (!have[promoKey(p)]) problems.push('promo missing (' + (p.date || '') + ', ' + String((p.text || '')).length + ' chars)');
+          });
+          checks.push({
+            account_id: aid,
+            store_name: item.store_name,
+            ok: problems.length === 0,
+            problems: problems,
+            stored: (got.body.item.promos || []).length,
+            posted: (item.promos || []).length,
+            stored_lens: (got.body.item.promos || []).map(function (p) { return (p.text || '').length; })
+          });
+        }
+        token = null;
+        var mismatches = checks.filter(function (c) { return !c.ok; }).length;
+        var status = (postOk && mismatches === 0) ? 'DONE' : 'DONE WITH ISSUES';
+        setStatus(status);
+        summaryEl.textContent = 'saved ' + saved + '/' + expected + ', write ok=' + postOk + ', verified ' + checks.length + ', mismatches ' + mismatches;
+        verifyEl.textContent = checks.map(function (c) {
+          return c.account_id + ' ' + (c.store_name || '') + ' ok=' + c.ok + ' posted=' + c.posted + ' stored=' + c.stored + ' stored_lens=' + JSON.stringify(c.stored_lens || []) + (c.problems && c.problems.length ? (' problems=' + c.problems.join('; ')) : '') + (c.error ? (' ' + c.error) : '');
+        }).join('\n');
+      } catch (e) {
+        token = null;
+        setStatus('FAILED');
+        summaryEl.textContent = String((e && e.message) || e);
+      }
+    })();
+  });
+})();
+</script>
+</body>
+</html>
